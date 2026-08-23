@@ -134,15 +134,20 @@ async function scrapeSchedule(page) {
 const normTeam = s => (s || '').toUpperCase().replace(/ß/g, 'SS').replace(/[^A-Z0-9]/g, '');
 
 // ---- Ticket-Events (ditix, oeffentlich, kein Token) ----
-async function fetchTickets() {
+// Liefert Heimspiel-Tickets UND Fanfahrten (Events mit "Fanfahrt" im Namen, meist Auswaertsspiele).
+async function fetchTicketEvents() {
   try {
     const html = await (await fetch('https://anker.ditix.shop/shop', { headers: { 'user-agent': 'Mozilla/5.0' } })).text();
     const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    const events = m ? (JSON.parse(m[1])?.props?.pageProps?.initialEvents?.getEventList?.data || []) : [];
+    const list = m ? (JSON.parse(m[1])?.props?.pageProps?.initialEvents?.getEventList || {}) : {};
+    const events = list.data || [];
+    if (list.total > events.length) console.error(`Tickets-Warnung: Shop meldet ${list.total} Events, Seite 1 liefert nur ${events.length}`);
     return events.filter(e => e.code).map(e => ({
+      name: e.name || '',
       opponent: (e.name || '').replace(/^HSG Varel\s*[-–]\s*/i, '').trim(),
       date: e.timestampStart ? new Date(e.timestampStart).toISOString().slice(0, 10) : null,
       url: `https://anker.ditix.shop/event/${e.code}`,
+      isFanfahrt: /fanfahrt/i.test(e.name || ''),
     }));
   } catch (e) { console.error('Tickets-Fehler:', e.message); return []; }
 }
@@ -174,15 +179,26 @@ try {
   const standings = await scrapeTable(page);
   const matches = await scrapeSchedule(page);
 
-  // Tickets + Livestreams anreichern (beide oeffentlich, ohne Token)
-  const tickets = await fetchTickets();
+  // Tickets + Fanfahrten + Livestreams anreichern (alle oeffentlich, ohne Token)
+  const events = await fetchTicketEvents();
+  const tickets = events.filter(t => !t.isFanfahrt);
+  const fanfahrten = events.filter(t => t.isFanfahrt);
   const streams = await fetchStreams();
+  // Ortsname-Stems des Gegners (>=5 Zeichen, auf 6 gekuerzt): "Wilhelmshavener HV" -> WILHEL
+  // matcht so auch "Fanfahrt nach Wilhelmshaven" trotz abweichender Endung.
+  const nameStems = s => (s || '').toUpperCase().replace(/ß/g, 'SS')
+    .split(/[^A-Z0-9]+/).filter(w => w.length >= 5).map(w => w.slice(0, 6));
   for (const mt of matches) {
     if (/varel/i.test(mt.home)) { // Ticket nur bei Heimspielen
       const opp = normTeam(mt.away);
       const t = tickets.find(x => x.date === mt.date)
         || tickets.find(x => { const o = normTeam(x.opponent); return o && (opp.includes(o) || o.includes(opp)); });
       if (t) mt.ticketUrl = t.url;
+    }
+    else { // Fanfahrt nur bei Auswaertsspielen: per Datum, sonst Gastgeber-Stem im Eventnamen
+      const f = fanfahrten.find(x => x.date === mt.date)
+        || fanfahrten.find(x => { const n = normTeam(x.name); return nameStems(mt.home).some(st => n.includes(st)); });
+      if (f) mt.fanfahrtUrl = f.url;
     }
     const s = streams.find(x => x.date === mt.date); // Stream per Spieltag
     if (s) { mt.streamUrl = s.url; if (s.live) mt.live = true; }
