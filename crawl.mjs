@@ -135,17 +135,27 @@ const normTeam = s => (s || '').toUpperCase().replace(/ß/g, 'SS').replace(/[^A-
 
 // ---- Ticket-Events (ditix, oeffentlich, kein Token) ----
 // Liefert Heimspiel-Tickets UND Fanfahrten (Events mit "Fanfahrt" im Namen, meist Auswaertsspiele).
+// Volles Event-Objekt (Halle, Bild, Zeiten) landet als ticketEvents-Block in der JSON
+// und wird von der Ticketshop-Seite nativ gerendert.
+const berlinParts = ts => new Date(ts).toLocaleString('sv-SE', { timeZone: 'Europe/Berlin' }); // "2026-09-05 19:30:00"
 async function fetchTicketEvents() {
   try {
     const html = await (await fetch('https://anker.ditix.shop/shop', { headers: { 'user-agent': 'Mozilla/5.0' } })).text();
     const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    const list = m ? (JSON.parse(m[1])?.props?.pageProps?.initialEvents?.getEventList || {}) : {};
+    const props = m ? (JSON.parse(m[1])?.props?.pageProps || {}) : {};
+    const list = props.initialEvents?.getEventList || {};
     const events = list.data || [];
     if (list.total > events.length) console.error(`Tickets-Warnung: Shop meldet ${list.total} Events, Seite 1 liefert nur ${events.length}`);
-    return events.filter(e => e.code).map(e => ({
+    const IMG_BASE = 'https://crud.production.ditix-production.services.ditix.app/file/image';
+    return events.filter(e => e.code && e.isPublished !== false && e.state !== 'CANCELED').map(e => ({
       name: e.name || '',
       opponent: (e.name || '').replace(/^HSG Varel\s*[-–]\s*/i, '').trim(),
-      date: e.timestampStart ? new Date(e.timestampStart).toISOString().slice(0, 10) : null,
+      date: e.timestampStart ? berlinParts(e.timestampStart).slice(0, 10) : null,
+      time: e.timestampStart && !e.hideEventDatesInShop ? berlinParts(e.timestampStart).slice(11, 16) : null,
+      timestampStart: e.timestampStart || null,
+      timestampEnd: e.timestampEnd || null,
+      venue: e.location?.name || null,
+      image: props.tenantId && e.coverImage?.id ? `${IMG_BASE}/${props.tenantId}/${e.coverImage.id}` : null,
       url: `https://anker.ditix.shop/event/${e.code}`,
       isFanfahrt: /fanfahrt/i.test(e.name || ''),
     }));
@@ -222,6 +232,7 @@ try {
     },
     nextMatch: upcoming[0] || null,
     lastMatch: finished.at(-1) || null,
+    ticketEvents: events,
     matches,
     standings: standings.length ? standings : null,
   };
