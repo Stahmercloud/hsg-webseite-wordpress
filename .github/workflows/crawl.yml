@@ -5,6 +5,9 @@ on:
     - cron: '*/15 * * * *'   # alle 15 Minuten
   workflow_dispatch:          # manuell ausloesbar
 
+permissions:
+  contents: read   # GITHUB_TOKEN darf nur lesen
+
 concurrency:
   group: handball-crawl
   cancel-in-progress: true

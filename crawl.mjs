@@ -7,8 +7,8 @@ const TEAM = '87310';
 const SEASON = '2627';
 const URL = `https://www.handball.net/team/${TEAM}?season_id=${SEASON}`;
 const OUT = process.env.OUT || 'handball-data.json';
-const WEEKS_BACK = 5;
-const WEEKS_FWD = 14;
+const WEEKS_BACK = 45;  // bis Saisonbeginn zurueck (kompletter Spielplan)
+const WEEKS_FWD = 45;   // bis Saisonende voraus
 
 function iso(dmy) {
   const m = dmy.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/);
@@ -107,7 +107,7 @@ async function scrapeSchedule(page) {
   await page.waitForTimeout(1000);
   const prev = page.locator('button.nav-arrow.prev:visible').first();
   const next = page.locator('button.nav-arrow.next:visible').first();
-  for (let i = 0; i < WEEKS_BACK; i++) { try { await prev.click({ timeout: 5000 }); await page.waitForTimeout(1300); } catch { break; } }
+  for (let i = 0; i < WEEKS_BACK; i++) { try { await prev.click({ timeout: 5000 }); await page.waitForTimeout(900); } catch { break; } }
   const seen = new Set(); const matches = [];
   for (let i = 0; i < WEEKS_BACK + WEEKS_FWD; i++) {
     const cards = await page.evaluate(() => [...document.querySelectorAll('.card-main-trigger')].map(el => {
@@ -125,7 +125,7 @@ async function scrapeSchedule(page) {
       const mt = parseMatch(card);
       if (mt.date && mt.home && mt.away) matches.push(mt);
     }
-    try { await next.click({ timeout: 5000 }); await page.waitForTimeout(1300); } catch { break; }
+    try { await next.click({ timeout: 5000 }); await page.waitForTimeout(900); } catch { break; }
   }
   matches.sort((a, b) => String(a.date).localeCompare(String(b.date)));
   return matches;
