@@ -1,0 +1,11 @@
+{
+  "name": "hsg-handball-crawl",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Crawlt Spielplan + Tabelle der HSG Varel (1. Herren, 3. Liga) von handball.net und laedt handball-data.json per FTPS auf die Vereinsseite.",
+  "dependencies": {
+    "playwright": "^1.48.0",
+    "basic-ftp": "^5.0.5"
+  }
+}

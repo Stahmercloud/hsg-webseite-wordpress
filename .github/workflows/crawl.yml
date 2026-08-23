@@ -1,0 +1,30 @@
+name: Handball Crawl
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # alle 15 Minuten
+  workflow_dispatch:          # manuell ausloesbar
+
+concurrency:
+  group: handball-crawl
+  cancel-in-progress: true
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      - name: Crawl handball.net
+        run: node crawl.mjs
+      - name: Upload via FTPS
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+        run: node upload.mjs
