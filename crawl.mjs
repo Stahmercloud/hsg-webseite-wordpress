@@ -131,6 +131,40 @@ async function scrapeSchedule(page) {
   return matches;
 }
 
+const normTeam = s => (s || '').toUpperCase().replace(/ß/g, 'SS').replace(/[^A-Z0-9]/g, '');
+
+// ---- Ticket-Events (ditix, oeffentlich, kein Token) ----
+async function fetchTickets() {
+  try {
+    const html = await (await fetch('https://anker.ditix.shop/shop', { headers: { 'user-agent': 'Mozilla/5.0' } })).text();
+    const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    const events = m ? (JSON.parse(m[1])?.props?.pageProps?.initialEvents?.getEventList?.data || []) : [];
+    return events.filter(e => e.code).map(e => ({
+      opponent: (e.name || '').replace(/^HSG Varel\s*[-–]\s*/i, '').trim(),
+      date: e.timestampStart ? new Date(e.timestampStart).toISOString().slice(0, 10) : null,
+      url: `https://anker.ditix.shop/event/${e.code}`,
+    }));
+  } catch (e) { console.error('Tickets-Fehler:', e.message); return []; }
+}
+
+// ---- Livestreams (sporteurope, oeffentliche Assets-API, kein Token) ----
+const SE_PROFILE = '9f57a72b-284f-4a38-888f-8f271fdd8b1a'; // Profil hsg-varel-maenner
+const SE_CHANNEL = 'https://sporteurope.tv/hsg-varel-maenner';
+async function fetchStreams() {
+  try {
+    const r = await fetch(`https://api.sporteurope.tv/api/web/public/profiles/${SE_PROFILE}/assets?page=1&per_page=100&lang=de`, { headers: { 'user-agent': 'Mozilla/5.0' } });
+    const assets = (await r.json()).data || [];
+    return assets
+      .filter(a => a.home_team?.slug === 'hsg-varel-maenner' || a.guest_team?.slug === 'hsg-varel-maenner')
+      .map(a => ({
+        date: (a.content_start_date || '').slice(0, 10),
+        url: a.profile?.slug && a.slug ? `https://sporteurope.tv/${a.profile.slug}/${a.slug}` : null,
+        live: !!a.currently_live,
+      }))
+      .filter(a => a.date && a.url);
+  } catch (e) { console.error('Streams-Fehler:', e.message); return []; }
+}
+
 const browser = await chromium.launch({ headless: true });
 try {
   const page = await (await browser.newContext({ locale: 'de-DE', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' })).newPage();
@@ -140,15 +174,36 @@ try {
   const standings = await scrapeTable(page);
   const matches = await scrapeSchedule(page);
 
+  // Tickets + Livestreams anreichern (beide oeffentlich, ohne Token)
+  const tickets = await fetchTickets();
+  const streams = await fetchStreams();
+  for (const mt of matches) {
+    if (/varel/i.test(mt.home)) { // Ticket nur bei Heimspielen
+      const opp = normTeam(mt.away);
+      const t = tickets.find(x => x.date === mt.date)
+        || tickets.find(x => { const o = normTeam(x.opponent); return o && (opp.includes(o) || o.includes(opp)); });
+      if (t) mt.ticketUrl = t.url;
+    }
+    const s = streams.find(x => x.date === mt.date); // Stream per Spieltag
+    if (s) { mt.streamUrl = s.url; if (s.live) mt.live = true; }
+  }
+
   const today = new Date().toISOString().slice(0, 10);
   const upcoming = matches.filter(m => m.status !== 'finished' && (m.date >= today));
   const finished = matches.filter(m => m.status === 'finished' || (m.date < today && m.homeGoals != null));
+  const liveStream = streams.find(s => s.live);
 
   const data = {
     lastUpdated: new Date().toISOString(),
     source: URL,
     team: { id: Number(TEAM), name: 'HSG Varel' },
     season: { id: Number(SEASON), name: 'Saison 2026/2027' },
+    stream: {
+      channel: SE_CHANNEL,
+      live: !!liveStream,
+      liveUrl: liveStream ? liveStream.url : null,
+      nextUrl: (upcoming[0] && upcoming[0].streamUrl) || null,
+    },
     nextMatch: upcoming[0] || null,
     lastMatch: finished.at(-1) || null,
     matches,
