@@ -34,14 +34,20 @@ async function clickTab(page, re) {
   return false;
 }
 
+const isLogo = s => typeof s === 'string' && /^https?:/.test(s) && !/\.svg(\?|$)/i.test(s);
+
 async function scrapeTable(page) {
   await clickTab(page, /tabelle/i);
   const rows = await page.evaluate(() => [...document.querySelectorAll('table tr')]
     .filter(tr => tr.querySelectorAll('td').length >= 5)
-    .map(tr => [...tr.children].map(x => (x.textContent || '').trim())));
-  return rows.map(c => ({
+    .map(tr => {
+      const img = tr.querySelector('img');
+      return { cells: [...tr.children].map(x => (x.textContent || '').trim()), logo: img ? img.getAttribute('src') : null };
+    }));
+  return rows.map(({ cells: c, logo }) => ({
     pos: Number(c[0]) || 0,
     team: titleCase(c[1]),
+    logo: isLogo(logo) ? logo : null,
     sp: Number(c[2]) || 0,
     punkte: c[3] || '0:0',
     diff: c[4] || '',
@@ -49,28 +55,49 @@ async function scrapeTable(page) {
   })).filter(r => r.team && !/^PL/i.test(String(r.pos)));
 }
 
-function parseMatch(raw) {
+// card = { text, logos:[{alt,src}] }. Namen aus dem Kartentext (zuverlaessig via
+// Wiederholungs-Muster "HOME<zeit|score>AWAY HOME AWAY..."); Logos per Name zugeordnet.
+const norm = s => (s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+function parseMatch(card) {
+  const raw = card.text;
+  const logos = (card.logos || []).filter(l => isLogo(l.src) && l.alt);
   const dm = raw.match(/(\d{1,2}\.\d{1,2}\.\d{4})/);
   const date = dm ? iso(dm[1]) : null;
   const finished = /BEENDET|ENDE(?!R)/i.test(raw);
   const live = /\bLIVE\b/i.test(raw);
-  const rest = raw.replace(/^.*?(ANSTEHEND|BEENDET|LIVE|VORSCHAU|ENDE)\s*/i, '');
-  // Muster: HOME (TIME UHR | SCORE) AWAY [HOME AWAY ...]
+
+  // Prefix (Datum, Liga, Status) abschneiden
+  let rest = raw.replace(/^.*?(ANSTEHEND|BEENDET|LIVE|VORSCHAU|ENDE)\s*/i, '');
+  if (rest === raw) rest = raw.replace(/^.*?Nord-West\s*/i, '').replace(/^.*?\d{4}\s*/, '');
+
   let home = null, away = null, time = null, hg = null, ag = null;
-  let m = rest.match(/^(.+?)(\d{2}:\d{2})\s*UHR(.+?)\1/);
-  if (!m) m = rest.match(/^(.+?)(\d{2}:\d{2})\s*UHR(.+?)$/);
+  let m = rest.match(/^(.+?)(\d{2}:\d{2})\s*UHR(.+?)\1/);           // geplant, wiederholt
   if (m) { home = m[1].trim(); time = m[2]; away = m[3].trim(); }
-  else {
-    // gespielt: HOME SCORE AWAY
-    const s = rest.match(/^(.+?)(\d{1,2}):(\d{1,2})(.+?)\1/) || rest.match(/^(.+?)(\d{1,2}):(\d{1,2})(.+?)$/);
-    if (s) { home = s[1].trim(); hg = Number(s[2]); ag = Number(s[3]); away = s[4].trim(); }
+  else if ((m = rest.match(/^(.+?)(\d{1,2}):(\d{1,2})(.+?)\1/))) {  // gespielt, wiederholt
+    home = m[1].trim(); hg = Number(m[2]); ag = Number(m[3]); away = m[4].trim();
+  } else if ((m = rest.match(/^(.+?)(\d{2}:\d{2})\s*UHR(.+?)$/))) { // geplant, einmalig
+    home = m[1].trim(); time = m[2]; away = m[3].trim();
   }
+  if (!time) { const tm = raw.match(/(\d{2}:\d{2})\s*UHR/i); if (tm) time = tm[1]; }
+  // Fallback: Namen aus Logo-Alts, falls Text nichts lieferte
+  if (!home && logos[0]) home = logos[0].alt;
+  if (!away && logos[1]) away = logos[1].alt;
+
+  // Logos per Name zuordnen (exakt, sonst Teilstring) - fehlt eins, bleibt es null (Badge)
+  const logoFor = name => {
+    const n = norm(name); if (!n) return null;
+    const hit = logos.find(l => norm(l.alt) === n)
+      || logos.find(l => norm(l.alt).includes(n) || n.includes(norm(l.alt)));
+    return hit ? hit.src : null;
+  };
+  const homeLogo = logoFor(home), awayLogo = logoFor(away);
+
   const compM = raw.match(/(\d\.\s*Liga[^]*?)(?:ANSTEHEND|BEENDET|LIVE|ENDE|\d{2}:\d{2})/);
   const competition = compM ? compM[1].trim().replace(/\s+/g, ' ') : '3. Liga';
   return {
     date, time, competition,
-    home: titleCase(home), away: titleCase(away),
-    homeGoals: hg, awayGoals: ag,
+    home: titleCase(home), away: titleCase(away), homeLogo, awayLogo,
+    homeGoals: finished ? hg : null, awayGoals: finished ? ag : null,
     status: finished ? 'finished' : (live ? 'live' : 'scheduled'),
   };
 }
@@ -83,12 +110,19 @@ async function scrapeSchedule(page) {
   for (let i = 0; i < WEEKS_BACK; i++) { try { await prev.click({ timeout: 5000 }); await page.waitForTimeout(1300); } catch { break; } }
   const seen = new Set(); const matches = [];
   for (let i = 0; i < WEEKS_BACK + WEEKS_FWD; i++) {
-    const cards = await page.evaluate(() => [...document.querySelectorAll('.card-main-trigger')].map(el => (el.textContent || '').replace(/\s+/g, ' ').trim()));
-    for (const raw of cards) {
-      if (!/varel/i.test(raw)) continue;
-      const key = raw.slice(0, 60);
+    const cards = await page.evaluate(() => [...document.querySelectorAll('.card-main-trigger')].map(el => {
+      const logos = [];
+      for (const img of el.querySelectorAll('img')) {
+        const src = img.getAttribute('src') || '', alt = (img.getAttribute('alt') || '').trim();
+        if (/^https?:/.test(src) && alt && !logos.some(l => l.alt === alt)) logos.push({ alt, src });
+      }
+      return { text: (el.textContent || '').replace(/\s+/g, ' ').trim(), logos };
+    }));
+    for (const card of cards) {
+      if (!/varel/i.test(card.text)) continue;
+      const key = card.text.slice(0, 60);
       if (seen.has(key)) continue; seen.add(key);
-      const mt = parseMatch(raw);
+      const mt = parseMatch(card);
       if (mt.date && mt.home && mt.away) matches.push(mt);
     }
     try { await next.click({ timeout: 5000 }); await page.waitForTimeout(1300); } catch { break; }
