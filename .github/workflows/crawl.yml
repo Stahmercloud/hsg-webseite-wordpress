@@ -1,9 +1,12 @@
 name: Handball Crawl
 
+# Kein Zeitplan mehr: GitHub loeste den frueheren Cron '*/15 * * * *' nur noch
+# 2-3x pro Tag aus. Schedule-Events sind bei Actions "best effort" und werden
+# unter Last verworfen. Der Crawler laeuft deshalb seit 28.08.2026 alle 15 Min.
+# auf dem Metabase-Server (91.98.166.254, /etc/cron.d/hsg-handball-crawl).
+# Dieser Workflow bleibt als Notnagel und fuer manuelle Laeufe bestehen.
 on:
-  schedule:
-    - cron: '*/15 * * * *'   # alle 15 Minuten
-  workflow_dispatch:          # manuell ausloesbar
+  workflow_dispatch:
 
 permissions:
   contents: read   # GITHUB_TOKEN darf nur lesen
