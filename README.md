@@ -28,6 +28,11 @@ Ein Lauf dauert rund 2,5 Minuten. Aenderungen an `crawl.mjs`/`upload.mjs`
 hierher pushen - der Server zieht sie nachts nach, sofort von Hand mit
 `ssh root@91.98.166.254 "cd /opt/hsg-handball-crawl && git pull"`.
 
+`run.sh` meldet Stoerungen per n8n-Webhook (Ziel und Empfaenger in
+`/opt/hsg-handball-crawl-runtime/notify.env`, 0600): Alarm ab dem zweiten
+Fehlschlag in Folge, danach nur noch alle 4 Stunden, plus Entwarnung beim
+naechsten erfolgreichen Lauf. Erfolgreiche Laeufe melden nichts.
+
 Secrets fuer den manuellen Workflow (Repo -> Settings -> Secrets -> Actions):
 `FTP_HOST`, `FTP_USER`, `FTP_PASS`. Auf dem Server stehen dieselben Werte in
 `/opt/hsg-handball-crawl-runtime/crawl.env` (Rechte 0600, nicht im Repo).
