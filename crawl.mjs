@@ -55,49 +55,72 @@ async function scrapeTable(page) {
   })).filter(r => r.team && !/^PL/i.test(String(r.pos)));
 }
 
-// card = { text, logos:[{alt,src}] }. Namen aus dem Kartentext (zuverlaessig via
-// Wiederholungs-Muster "HOME<zeit|score>AWAY HOME AWAY..."); Logos per Name zugeordnet.
+// card = { text, logos, date, league, status, home:{name,logo}, away:{name,logo}, score, time }
+// Namen, Logos, Zeit und Ergebnis kommen aus dem DOM der Spielkarte (.match-desktop).
+// Der alte Textparser ist nur noch Notnagel, falls handball.net die Struktur umbaut: er
+// verliess sich auf das Wiederholungs-Muster "HOME<zeit|score>AWAY HOME AWAY" und zerlegte
+// Live-/Beendet-Karten falsch, weil dort Uhrzeit und Spielstand ineinander rutschen.
 const norm = s => (s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-function parseMatch(card) {
-  const raw = card.text;
-  const logos = (card.logos || []).filter(l => isLogo(l.src) && l.alt);
-  const dm = raw.match(/(\d{1,2}\.\d{1,2}\.\d{4})/);
-  const date = dm ? iso(dm[1]) : null;
-  const finished = /BEENDET|ENDE(?!R)/i.test(raw);
-  const live = /\bLIVE\b/i.test(raw);
+const badName = n => !n || n.trim().length < 2 || n.length > 60 || /\d{1,2}:\d{2}|\bUHR\b/i.test(n);
 
-  // Prefix (Datum, Liga, Status) abschneiden
+function parseFromText(raw) {
   let rest = raw.replace(/^.*?(ANSTEHEND|BEENDET|LIVE|VORSCHAU|ENDE)\s*/i, '');
   if (rest === raw) rest = raw.replace(/^.*?Nord-West\s*/i, '').replace(/^.*?\d{4}\s*/, '');
+  let out = {}, m;
+  if ((m = rest.match(/^(.+?)(\d{2}:\d{2})\s*UHR(.+?)\1/))) out = { home: m[1], time: m[2], away: m[3] };
+  else if ((m = rest.match(/^(.+?)(\d{1,2}):(\d{1,2})(.+?)\1/))) out = { home: m[1], hg: Number(m[2]), ag: Number(m[3]), away: m[4] };
+  else if ((m = rest.match(/^(.+?)(\d{2}:\d{2})\s*UHR(.+?)$/))) out = { home: m[1], time: m[2], away: m[3] };
+  if (out.home) out.home = out.home.trim();
+  if (out.away) out.away = out.away.trim();
+  return out;
+}
 
-  let home = null, away = null, time = null, hg = null, ag = null;
-  let m = rest.match(/^(.+?)(\d{2}:\d{2})\s*UHR(.+?)\1/);           // geplant, wiederholt
-  if (m) { home = m[1].trim(); time = m[2]; away = m[3].trim(); }
-  else if ((m = rest.match(/^(.+?)(\d{1,2}):(\d{1,2})(.+?)\1/))) {  // gespielt, wiederholt
-    home = m[1].trim(); hg = Number(m[2]); ag = Number(m[3]); away = m[4].trim();
-  } else if ((m = rest.match(/^(.+?)(\d{2}:\d{2})\s*UHR(.+?)$/))) { // geplant, einmalig
-    home = m[1].trim(); time = m[2]; away = m[3].trim();
+function parseMatch(card) {
+  const raw = card.text || '';
+  const state = (card.status || '') + ' ' + raw;
+  const finished = /BEENDET|\bfinished\b|ENDE(?!R)/i.test(state);
+  const live = !finished && /\bLIVE\b/i.test(state);
+
+  const dm = (card.date || raw).match(/(\d{1,2}\.\d{1,2}\.\d{4})/);
+  const date = dm ? iso(dm[1]) : null;
+
+  let home = card.home && card.home.name, away = card.away && card.away.name;
+  let homeLogo = (card.home && card.home.logo) || null, awayLogo = (card.away && card.away.logo) || null;
+  const tm = (card.time || '').match(/(\d{1,2}:\d{2})/);
+  let time = tm ? tm[1] : null;
+  const sm = (card.score || '').match(/(\d{1,3})\s*:\s*(\d{1,3})/);
+  let hg = sm ? Number(sm[1]) : null, ag = sm ? Number(sm[2]) : null;
+
+  if (badName(home) || badName(away)) {          // DOM unbrauchbar -> Textparser als Notnagel
+    const t = parseFromText(raw);
+    home = badName(t.home) ? null : t.home;
+    away = badName(t.away) ? null : t.away;
+    homeLogo = awayLogo = null;                  // Logos dann ueber die Alt-Texte zuordnen
+    if (!time && t.time) time = t.time;
+    if (hg == null && t.hg != null) { hg = t.hg; ag = t.ag; }
   }
-  if (!time) { const tm = raw.match(/(\d{2}:\d{2})\s*UHR/i); if (tm) time = tm[1]; }
-  // Fallback: Namen aus Logo-Alts, falls Text nichts lieferte
-  if (!home && logos[0]) home = logos[0].alt;
-  if (!away && logos[1]) away = logos[1].alt;
 
   // Logos per Name zuordnen (exakt, sonst Teilstring) - fehlt eins, bleibt es null (Badge)
+  const logos = (card.logos || []).filter(l => isLogo(l.src) && l.alt);
   const logoFor = name => {
     const n = norm(name); if (!n) return null;
     const hit = logos.find(l => norm(l.alt) === n)
       || logos.find(l => norm(l.alt).includes(n) || n.includes(norm(l.alt)));
     return hit ? hit.src : null;
   };
-  const homeLogo = logoFor(home), awayLogo = logoFor(away);
+  if (!home && logos[0]) home = logos[0].alt;
+  if (!away && logos[1]) away = logos[1].alt;
+  if (!homeLogo) homeLogo = logoFor(home);
+  if (!awayLogo) awayLogo = logoFor(away);
+  if (!time) { const t2 = raw.match(/(\d{1,2}:\d{2})\s*UHR/i); if (t2) time = t2[1]; }
 
   const compM = raw.match(/(\d\.\s*Liga[^]*?)(?:ANSTEHEND|BEENDET|LIVE|ENDE|\d{2}:\d{2})/);
-  const competition = compM ? compM[1].trim().replace(/\s+/g, ' ') : '3. Liga';
+  const competition = (card.league || (compM ? compM[1] : '3. Liga')).trim().replace(/\s+/g, ' ');
+  const withScore = (finished || live) && hg != null;
   return {
     date, time, competition,
     home: titleCase(home), away: titleCase(away), homeLogo, awayLogo,
-    homeGoals: finished ? hg : null, awayGoals: finished ? ag : null,
+    homeGoals: withScore ? hg : null, awayGoals: withScore ? ag : null,
     status: finished ? 'finished' : (live ? 'live' : 'scheduled'),
   };
 }
@@ -110,20 +133,54 @@ async function scrapeSchedule(page) {
   for (let i = 0; i < WEEKS_BACK; i++) { try { await prev.click({ timeout: 5000 }); await page.waitForTimeout(900); } catch { break; } }
   const seen = new Set(); const matches = [];
   for (let i = 0; i < WEEKS_BACK + WEEKS_FWD; i++) {
-    const cards = await page.evaluate(() => [...document.querySelectorAll('.card-main-trigger')].map(el => {
-      const logos = [];
-      for (const img of el.querySelectorAll('img')) {
-        const src = img.getAttribute('src') || '', alt = (img.getAttribute('alt') || '').trim();
-        if (/^https?:/.test(src) && alt && !logos.some(l => l.alt === alt)) logos.push({ alt, src });
-      }
-      return { text: (el.textContent || '').replace(/\s+/g, ' ').trim(), logos };
-    }));
+    const cards = await page.evaluate(() => {
+      const txt = el => el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : '';
+      const logoSrc = img => {
+        if (!img) return null;
+        const s = img.getAttribute('src') || img.getAttribute('data-cmp-src') || '';
+        return /^https?:/.test(s) ? s : null;
+      };
+      return [...document.querySelectorAll('.card-main-trigger')].map(el => {
+        const logos = [];
+        for (const img of el.querySelectorAll('img')) {
+          const src = img.getAttribute('src') || '', alt = (img.getAttribute('alt') || '').trim();
+          if (/^https?:/.test(src) && alt && !logos.some(l => l.alt === alt)) logos.push({ alt, src });
+        }
+        // Desktop-Block: eindeutige Heim-/Gastseite. Fehlt er, dienen die Mobil-Zeilen
+        // in der Reihenfolge Heim, Gast als Ersatz.
+        const box = el.querySelector('.match-desktop') || el;
+        const rows = [...box.querySelectorAll('.team-row')];
+        const side = (cls, idx) => {
+          const a = box.querySelector('a.' + cls) || (rows[idx] ? rows[idx].querySelector('a.team-link') : null);
+          if (!a) return null;
+          const img = a.querySelector('img.team-logo');
+          return {
+            name: txt(a.querySelector('.team-name')) || (img ? (img.getAttribute('alt') || '').trim() : ''),
+            logo: logoSrc(img),
+          };
+        };
+        const sc = box.querySelector('.score-container');
+        const badge = el.querySelector('.match-status-badge');
+        return {
+          text: txt(el),
+          logos,
+          date: txt(el.querySelector('.match-date')),
+          league: txt(el.querySelector('.league-name')),
+          status: txt(badge) + ' ' + (badge ? badge.className : '') + ' ' + (sc ? sc.className : ''),
+          home: side('home-team', 0),
+          away: side('away-team', 1),
+          score: txt(sc && sc.querySelector('.score-text')),
+          time: txt(sc && sc.querySelector('.time')),
+        };
+      });
+    });
     for (const card of cards) {
       if (!/varel/i.test(card.text)) continue;
-      const key = card.text.slice(0, 60);
-      if (seen.has(key)) continue; seen.add(key);
       const mt = parseMatch(card);
-      if (mt.date && mt.home && mt.away) matches.push(mt);
+      if (!mt.date || !mt.home || !mt.away) continue;
+      const key = mt.date + '|' + mt.home + '|' + mt.away;   // Live-Karten aendern ihren Text
+      if (seen.has(key)) continue; seen.add(key);
+      matches.push(mt);
     }
     try { await next.click({ timeout: 5000 }); await page.waitForTimeout(900); } catch { break; }
   }
