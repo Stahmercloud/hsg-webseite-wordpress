@@ -40,7 +40,7 @@ async function scrapeTable(page) {
       const img = tr.querySelector('img');
       return { cells: [...tr.children].map(x => (x.textContent || '').trim()), logo: img ? img.getAttribute('src') : null };
     }));
-  return rows.map(({ cells: c, logo }) => ({
+  const parsed = rows.map(({ cells: c, logo }) => ({
     pos: Number(c[0]) || 0,
     team: titleCase(c[1]),
     logo: isLogo(logo) ? logo : null,
@@ -49,6 +49,36 @@ async function scrapeTable(page) {
     diff: c[4] || '',
     isSelf: /varel/i.test(c[1]),
   })).filter(r => r.team && !/^PL/i.test(String(r.pos)));
+  return rankStandings(parsed);
+}
+
+// ---- Tabellenreihenfolge selbst herstellen ----
+// handball.net liefert die Zeilen zeitweise unsortiert und nummeriert sie
+// trotzdem stumpf von 1 durch: am 09.09.2026 stand ein Team mit 4:0 Punkten
+// hinter einem mit 2:2, die HSG mit 0:4 vor einem Team mit 2:2. Die Werte der
+// Zeilen stimmen, nur ihre Reihenfolge nicht - also sortieren wir nach den
+// Kriterien der Spielordnung selbst und vergeben die Platzziffern neu:
+// Pluspunkte, dann weniger Minuspunkte, dann Tordifferenz, dann mehr geworfene
+// Tore. Der direkte Vergleich laesst sich aus der Tabelle nicht ableiten -
+// bleibt danach alles gleich, behalten wir die Reihenfolge von handball.net.
+const scorePair = s => {
+  const m = String(s == null ? '' : s).match(/(-?\d+)\s*:\s*(-?\d+)/);
+  return m ? [Number(m[1]), Number(m[2])] : [0, 0];
+};
+function rankStandings(rows) {
+  // Vor dem ersten Spieltag zeigt handball.net keine Plaetze (pos 0) - dann
+  // gibt es nichts zu sortieren, und erfundene Ziffern wuerden im Frontend die
+  // Auf-/Abstiegszonen einfaerben.
+  if (!rows.some(r => r.pos > 0)) return rows;
+  return rows
+    .map((r, i) => {
+      const [plus, minus] = scorePair(r.punkte);
+      const [tore, gegentore] = scorePair(r.diff);
+      return { r, i, plus, minus, diff: tore - gegentore, tore };
+    })
+    .sort((a, b) => b.plus - a.plus || a.minus - b.minus
+      || b.diff - a.diff || b.tore - a.tore || a.i - b.i)
+    .map((x, i) => ({ ...x.r, pos: i + 1 }));
 }
 
 // ---- Spielplan: die JSON-API, die handball.net selbst benutzt ----
