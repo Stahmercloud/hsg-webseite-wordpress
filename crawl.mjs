@@ -1,7 +1,7 @@
 // crawl.mjs - liest Spielplan + Tabelle der HSG Varel (1. Herren, 3. Liga) von handball.net
 // und schreibt handball-data.json im HSG-Schema. Laeuft in GitHub Actions (headless).
 import { chromium } from 'playwright';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 
 const TEAM = '87310';
 const SEASON = '2627';
@@ -30,10 +30,15 @@ async function clickTab(page, re) {
   return false;
 }
 
+const firstLine = s => String(s || '').split('\n')[0];
+
 const isLogo = s => typeof s === 'string' && /^https?:/.test(s) && !/\.svg(\?|$)/i.test(s);
 
-async function scrapeTable(page) {
-  await clickTab(page, /tabelle/i);
+// Rueckfallebene: die Tabelle so aus dem DOM lesen, wie es bis zum 15.09.2026
+// der Normalweg war. Der Klick kann am Consent-Layer scheitern - dann bleibt es
+// bei einer leeren Liste, statt den ganzen Lauf abzubrechen.
+async function scrapeTableDom(page) {
+  try { await clickTab(page, /tabelle/i); } catch (e) { console.error('Tabellen-Tab nicht klickbar:', firstLine(e.message)); }
   const rows = await page.evaluate(() => [...document.querySelectorAll('table tr')]
     .filter(tr => tr.querySelectorAll('td').length >= 5)
     .map(tr => {
@@ -81,6 +86,70 @@ function rankStandings(rows) {
     .map((x, i) => ({ ...x.r, pos: i + 1 }));
 }
 
+// ---- Zugriff auf die JSON-API von handball.net ----
+// Die API antwortet nur aus dem Seitenkontext heraus (direkt: HTTP 403), darum
+// laeuft jeder Aufruf als fetch() in der schon geladenen Team-Seite.
+async function apiJson(page, url, label) {
+  const res = await page.evaluate(async u => {
+    const r = await fetch(u, { headers: { accept: 'application/json' } });
+    return { status: r.status, body: await r.text() };
+  }, url);
+  if (res.status !== 200) throw new Error(`${label}: HTTP ${res.status} - ${res.body.slice(0, 200)}`);
+  return JSON.parse(res.body);
+}
+
+// ---- Tabelle: seit 15.09.2026 ebenfalls aus der API statt aus dem DOM ----
+// Die Team-Seite fragt die Tabelle seit dem 15.09.2026 mit einem round-Parameter
+// ab und setzt darin die *letzte* Runde der Serie ein (round=30) statt der
+// laufenden (round=4). Die Antwort ist leer, die Seite schreibt "Keine
+// Tabellendaten verfuegbar" - und im DOM stand danach keine Tabelle mehr, die
+// sich auslesen liesse. Ohne round liefert dieselbe API alle Runden am Stueck;
+// die Runde mit den meisten gespielten Spielen ist der aktuelle Stand.
+const MAX_TABLE_ROUNDS = 80; // Plausibilitaetsgrenze: mehr Runden hat keine Serie
+
+function pickCurrentRound(rows) {
+  const rounds = new Map();
+  for (const r of rows) {
+    const no = Number(r.round) || 0;
+    const e = rounds.get(no) || { no, rows: [], played: 0 };
+    e.rows.push(r);
+    e.played += Number(r.played) || 0;
+    rounds.set(no, e);
+  }
+  if (!rounds.size || rounds.size > MAX_TABLE_ROUNDS) return [];
+  // Meiste ausgetragene Spiele gewinnt; bei Gleichstand (noch kein Spieltag,
+  // alle Runden bei 0) die hoechste Rundennummer - die traegt den Endstand.
+  const best = [...rounds.values()].sort((a, b) => b.played - a.played || b.no - a.no)[0];
+  return best.rows;
+}
+
+function mapStandingRow(r) {
+  const team = r.team || {};
+  const name = String(team.name || '').trim();
+  const sp = Number(r.played) || 0;
+  const plus = Number(r.points) || 0;
+  return {
+    pos: Number(r.position) || 0,
+    team: titleCase(name),
+    logo: team.club && isLogo(team.club.logo) ? team.club.logo : null,
+    sp,
+    // handball.net zeigt Plus:Minus - die API kennt nur die Pluspunkte.
+    punkte: `${plus}:${Math.max(0, sp * 2 - plus)}`,
+    diff: `${Number(r.goals_for) || 0}:${Number(r.goals_against) || 0}`,
+    isSelf: /varel/i.test(name),
+  };
+}
+
+async function fetchStandings(page) {
+  const comps = await apiJson(page, `/api/new/teams/${TEAM}/competitions?season_id=${SEASON}`, 'Wettbewerbs-API');
+  const phases = comps.data || [];
+  const phase = phases.find(c => c.has_standings) || phases[0];
+  if (!phase || !phase.id) throw new Error('Wettbewerbs-API nennt keine Staffel mit Tabelle');
+  const all = (await apiJson(page, `/api/new/standings?phase_id=${phase.id}`, 'Tabellen-API')).data || [];
+  const rows = pickCurrentRound(all).map(mapStandingRow).filter(r => r.team);
+  return rankStandings(rows);
+}
+
 // ---- Spielplan: die JSON-API, die handball.net selbst benutzt ----
 // Frueher wurde der Spielplan-Tab Woche fuer Woche durchgeklickt. Seit dem
 // 06.09.2026 listet der Tab nur noch kommende Spiele und die Pfeile schieben
@@ -122,12 +191,7 @@ async function scrapeSchedule(page) {
   let total = null;
   for (let no = 1; no <= 20; no++) {
     const url = `/api/new/matches?team_id=${TEAM}&date_from=${SEASON_START}&date_to=${SEASON_END}&per_page=100&page=${no}`;
-    const res = await page.evaluate(async u => {
-      const r = await fetch(u, { headers: { accept: 'application/json' } });
-      return { status: r.status, body: await r.text() };
-    }, url);
-    if (res.status !== 200) throw new Error(`Spielplan-API: HTTP ${res.status} - ${res.body.slice(0, 200)}`);
-    const json = JSON.parse(res.body);
+    const json = await apiJson(page, url, 'Spielplan-API');
     const pg = json.pagination || {};
     if (pg.total != null) total = pg.total;
     for (const m of json.data || []) raw.push(m);
@@ -201,7 +265,13 @@ try {
   await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(1500); await consent(page); await page.waitForTimeout(1500);
 
-  const standings = await scrapeTable(page);
+  let standings = [];
+  try { standings = await fetchStandings(page); }
+  catch (e) { console.error('Tabellen-API-Fehler:', e.message); }
+  if (!standings.length) {
+    console.error('Tabelle: API liefert keine Zeilen - Rueckfall auf den Tabellen-Tab');
+    standings = await scrapeTableDom(page);
+  }
   const matches = await scrapeSchedule(page);
 
   // Laeuft die Liga (Tabelle steht), muss es auch Spiele geben. Ohne diese Bremse
@@ -240,6 +310,19 @@ try {
   const upcoming = matches.filter(m => m.status !== 'finished' && (m.date >= today));
   const finished = matches.filter(m => m.status === 'finished' || (m.date < today && m.homeGoals != null));
   const liveStream = streams.find(s => s.live);
+
+  // Letzter Rettungsanker: liefert weder API noch DOM eine Tabelle, bleibt der
+  // Stand des vorigen Laufs stehen. Sonst verschwindet die Tabelle bei jedem
+  // Ausrutscher der Quelle sofort von der Seite (15.09.2026).
+  if (!standings.length) {
+    try {
+      const prev = JSON.parse(readFileSync(OUT, 'utf8'));
+      if (prev.standings && prev.standings.length) {
+        standings = prev.standings;
+        console.error(`Tabelle: uebernehme den Stand des letzten Laufs (${prev.lastUpdated})`);
+      }
+    } catch (e) { console.error('Tabelle: kein alter Stand vorhanden:', e.message); }
+  }
 
   const data = {
     lastUpdated: new Date().toISOString(),
